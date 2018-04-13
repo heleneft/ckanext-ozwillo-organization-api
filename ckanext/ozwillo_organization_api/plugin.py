@@ -3,6 +3,7 @@ import hmac
 import requests
 import logging
 import json
+import re
 from slugify import slugify
 
 import ckan.plugins as plugins
@@ -22,11 +23,12 @@ plugin_config_prefix = 'ckanext.ozwillo_organization_api.'
 
 log = logging.getLogger(__name__)
 
+
 def valid_signature_required(secret_prefix):
 
     signature_header_name = config.get(plugin_config_prefix + 'signature_header_name',
                                        'X-Hub-Signature')
-    api_secret = config.get(plugin_config_prefix + secret_prefix +'_secret', 'secret')
+    api_secret = config.get(plugin_config_prefix + secret_prefix + '_secret', 'secret')
 
     def decorator(func):
         def wrapper(context, data):
@@ -54,8 +56,7 @@ def create_organization(context, data_dict):
     model = context['model']
     session = context['session']
 
-    destruction_secret = config.get(plugin_config_prefix + 'destruction_secret',
-                                       'changeme')
+    destruction_secret = config.get(plugin_config_prefix + 'destruction_secret', 'changeme')
 
     client_id = data_dict.pop('client_id')
     client_secret = data_dict.pop('client_secret')
@@ -115,6 +116,9 @@ def create_organization(context, data_dict):
                          value=client_secret).save()
         session.flush()
 
+        # Automatically add data from data gouv
+        after_create(group, data_dict['organization'])
+
         # notify about organization creation
         services = {'services': [{
             'local_id': 'organization',
@@ -143,11 +147,11 @@ def create_organization(context, data_dict):
         requests.post(registration_uri,
                       data=json.dumps(services),
                       auth=(client_id, client_secret),
-                      headers=headers
-                  )
+                      headers=headers)
     except logic.ValidationError, e:
         log.debug('Validation error "%s" occured while creating organization' % e)
         raise
+
 
 @valid_signature_required(secret_prefix='destruction')
 def delete_organization(context, data_dict):
@@ -217,39 +221,110 @@ class OzwilloOrganizationApiPlugin(plugins.SingletonPlugin):
             'delete-ozwillo-organization': delete_organization
         }
 
+
+# Used for tests purposes
 class CreateOrganizationPlugin(plugins.SingletonPlugin):
     plugins.implements(plugins.interfaces.IOrganizationController, inherit=True)
 
     def create(self, entity):
-        city = 'Auron' #TO CHANGE TO CITY
-        organization_id = entity.id
+        after_create(entity, 'Cassis')
 
-        base_url_1 = 'https://www.data.gouv.fr/api/1/territory/suggest/?q='
-        base_url_2 = 'https://www.data.gouv.fr/api/1/spatial/zone/'
-        end_url_2 = '/datasets?dynamic=true'
 
-        try:
-            city_response = requests.get(base_url_1 + slugify(city))
-            city_json = city_response.json()
-            city_name = city_json[0]['title']
-            city_id = city_json[0]['id']
+def after_create(entity, city_name):
+    '''
+    This method is called after a new instance is created.
+    It uses the services from data.gouv.fr to automatically add data to our new instance.
+    It is possible to add automatically any other resources from different services as
+    long as an api returns the desired resources urls.
 
-            package_data = {'name': slugify(city_name),
-                            'private': 'false',
-                            'owner_org': organization_id}
-            package_id = toolkit.get_action('package_create')({'return_id_only': 'true'}, package_data)
+    :param entity: object, the organization being created
+    :param city_name: string, the name of the city being created. It has to be as close as possible
+    to the real city name as it would be used as the main parameter in the request to retrieve the data
+    :return:
+    '''
 
-            url = base_url_2 + city_id + end_url_2
-            city_datasets = requests.get(url)
-            dataset_json = city_datasets.json()
-            dataset_dict = {el['title']: el['page'] for el in dataset_json}
+    city = slugify(city_name)
+    organization_id = entity.id
+    insee_re = re.compile(r'\d{5}')
+    base_url_1 = 'https://www.data.gouv.fr/api/1/territory/suggest/?q='
+    base_url_2 = 'https://www.data.gouv.fr/api/1/spatial/zone/{}/datasets?'
 
-            for key, value in dataset_dict.items():
-                gouv_resource = {'package_id': package_id,
-                                 'url': value,
-                                 'name': key}
-                toolkit.get_action('resource_create')({}, gouv_resource)
+    try:
+        # Get the city from the gouv api and extract the name, id, description and insee
+        city_response = requests.get(base_url_1 + city)
+        city_json = city_response.json()
+        city_name = slugify(city_json[0]['title'])
+        city_id = city_json[0]['id']
+        city_description = city_json[0]['page']
+        city_insee = insee_re.search(city_id).group()
+        log.info(city_name)
 
-        except Exception as e:
-            log.error(e)
-            return
+        # Create the dataset that will contain all our new resources
+        package_data = {'name': city_name,
+                        'private': 'false',
+                        'owner_org': organization_id,
+                        'notes': city_description}
+        package_id = toolkit.get_action('package_create')({'return_id_only': 'true'}, package_data)
+
+        # Get the others non dynamic urls from the data gouv api
+        city_datasets = requests.get(base_url_2.format(city_id))
+        dataset_json = city_datasets.json()
+
+        # Get the dataset dict with dynamic datasets
+        dataset_dict = setup_dataset_dict(city_insee)
+
+        # Complete the dataset_dict with these new urls, after checking they are valid urls
+        # If there are few links for the same resource, takes the first valid one
+        for dataset in dataset_json:
+            response = requests.get(dataset['uri'])
+            if response.status_code == 404:
+                continue
+            else:
+                response_json = response.json()
+                resources = response_json['resources']
+                for resource in resources:
+                    r = requests.get(resource['url'])
+                    if r.status_code == 200:
+                        dataset_dict[dataset['title']] = resource['url']
+                        break
+
+        # Create the resources from the dataset_dict in our previously created dataset
+        for key, value in dataset_dict.items():
+            gouv_resource = {'package_id': package_id,
+                             'url': value,
+                             'name': key}
+            toolkit.get_action('resource_create')({}, gouv_resource)
+
+        log.info('Added %s resources to the dataset' % (len(dataset_dict.keys())))
+        log.debug(dataset_dict)
+
+    except Exception as e:
+        log.error(e)
+        return
+
+def setup_dataset_dict(city_insee):
+    # Base resources urls for the 9 dynamic datasets found in every town page in datagouv
+    # These urls can't be retrieved via see API (see below) so we add them manually using the city insee number
+    url_population = 'https://www.insee.fr/fr/statistiques/tableaux/2021173/COM/{}/popleg2013_cc_popleg.xls'
+    url_figures = 'https://www.insee.fr/fr/statistiques/tableaux/2020310/COM/{}/rp2013_cc_fam.xls'
+    url_education = 'https://www.insee.fr/fr/statistiques/tableaux/2020665/COM/{}/rp2013_cc_for.xls'
+    url_employement = 'https://www.insee.fr/fr/statistiques/tableaux/2020907/COM/{}/rp2013_cc_act.xls'
+    url_housing = 'https://www.insee.fr/fr/statistiques/tableaux/2020507/COM/{}/rp2013_cc_log.xls'
+    url_sirene = 'http://212.47.238.202/geo_sirene/last/communes/{}.csv'
+    url_zones = 'http://sig.ville.gouv.fr/Territoire/{}/onglet/DonneesLocales'
+    url_budget = 'http://alize2.finances.gouv.fr/communes/eneuro/tableau.php?icom={}&dep=0{}&type=BPS&param=0'
+    url_adresses = 'http://bano.openstreetmap.fr/BAN_odbl/communes/BAN_odbl_{}.csv'
+
+    # Create a dataset_dict linking resources names with their url
+    # Here we add manually the dynamic datasets
+    dataset_dict = {'Population': url_population.format(city_insee),
+                    'Chiffres cles': url_figures.format(city_insee),
+                    'Diplomes - Formation': url_education.format(city_insee),
+                    'Emploi': url_employement.format(city_insee),
+                    'Logement': url_housing.format(city_insee),
+                    'SIRENE': url_sirene.format(city_insee),
+                    'Zonage des politiques de la ville': url_zones.format(city_insee),
+                    'Comptes de la collectivite': url_budget.format(city_insee[2:], city_insee[:2]),
+                    'Adresses': url_adresses.format(city_insee)}
+    
+    return dataset_dict
