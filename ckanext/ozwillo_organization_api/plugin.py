@@ -216,3 +216,40 @@ class OzwilloOrganizationApiPlugin(plugins.SingletonPlugin):
             'create-ozwillo-organization': create_organization,
             'delete-ozwillo-organization': delete_organization
         }
+
+class CreateOrganizationPlugin(plugins.SingletonPlugin):
+    plugins.implements(plugins.interfaces.IOrganizationController, inherit=True)
+
+    def create(self, entity):
+        city = 'Auron' #TO CHANGE TO CITY
+        organization_id = entity.id
+
+        base_url_1 = 'https://www.data.gouv.fr/api/1/territory/suggest/?q='
+        base_url_2 = 'https://www.data.gouv.fr/api/1/spatial/zone/'
+        end_url_2 = '/datasets?dynamic=true'
+
+        try:
+            city_response = requests.get(base_url_1 + slugify(city))
+            city_json = city_response.json()
+            city_name = city_json[0]['title']
+            city_id = city_json[0]['id']
+
+            package_data = {'name': slugify(city_name),
+                            'private': 'false',
+                            'owner_org': organization_id}
+            package_id = toolkit.get_action('package_create')({'return_id_only': 'true'}, package_data)
+
+            url = base_url_2 + city_id + end_url_2
+            city_datasets = requests.get(url)
+            dataset_json = city_datasets.json()
+            dataset_dict = {el['title']: el['page'] for el in dataset_json}
+
+            for key, value in dataset_dict.items():
+                gouv_resource = {'package_id': package_id,
+                                 'url': value,
+                                 'name': key}
+                toolkit.get_action('resource_create')({}, gouv_resource)
+
+        except Exception as e:
+            log.error(e)
+            return

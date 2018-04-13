@@ -80,5 +80,6 @@ setup(
         [ckan.plugins]
         ozwillo_organization_api=ckanext.ozwillo_organization_api.plugin:OzwilloOrganizationApiPlugin
         ozwillo_organization_form=ckanext.ozwillo_organization_api.plugin:OrganizationForm
+        ozwillo_organization_create=ckanext.ozwillo_organization_api.plugin:CreateOrganizationPlugin
     ''',
 )
