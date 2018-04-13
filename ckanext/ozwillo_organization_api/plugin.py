@@ -4,6 +4,7 @@ import requests
 import logging
 import json
 import re
+from datetime import datetime
 from slugify import slugify
 
 import ckan.plugins as plugins
@@ -246,8 +247,10 @@ def after_create(entity, city_name):
     city = slugify(city_name)
     organization_id = entity.id
     insee_re = re.compile(r'\d{5}')
+    site_url = config.get('ckan.site_url')
     base_url_1 = 'https://www.data.gouv.fr/api/1/territory/suggest/?q='
     base_url_2 = 'https://www.data.gouv.fr/api/1/spatial/zone/{}/datasets?'
+    check_url = site_url + '/api/3/action/package_search?q='
 
     try:
         # Get the city from the gouv api and extract the name, id, description and insee
@@ -258,6 +261,11 @@ def after_create(entity, city_name):
         city_description = city_json[0]['page']
         city_insee = insee_re.search(city_id).group()
         log.info(city_name)
+
+        # Check if a package with city_name already exists. If it does, add the date and time to the city name
+        package_exist = requests.get(check_url + city_name)
+        if package_exist.json()['result']['count'] != 0:
+            city_name += slugify(str(datetime.now()))[:19]
 
         # Create the dataset that will contain all our new resources
         package_data = {'name': city_name,
