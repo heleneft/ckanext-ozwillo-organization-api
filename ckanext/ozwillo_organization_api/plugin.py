@@ -231,7 +231,7 @@ class CreateOrganizationPlugin(plugins.SingletonPlugin):
         after_create(entity, 'Cassis')
 
 
-def after_create(entity, city_name):
+def after_create(entity, organization_name):
     '''
     This method is called after a new instance is created.
     It uses the services from data.gouv.fr to automatically add data to our new instance.
@@ -239,12 +239,12 @@ def after_create(entity, city_name):
     long as an api returns the desired resources urls.
 
     :param entity: object, the organization being created
-    :param city_name: string, the name of the city being created. It has to be as close as possible
+    :param organization_name: string, the name of the organization being created. It has to be as close as possible
     to the real city name as it would be used as the main parameter in the request to retrieve the data
     :return:
     '''
 
-    city = slugify(city_name)
+    organization = slugify(organization_name)
     organization_id = entity.id
     insee_re = re.compile(r'\d{5}')
     site_url = config.get('ckan.site_url')
@@ -254,7 +254,7 @@ def after_create(entity, city_name):
 
     try:
         # Get the city from the gouv api and extract the name, id, description and insee
-        city_response = requests.get(base_url_1 + city)
+        city_response = requests.get(base_url_1 + organization)
         city_json = city_response.json()
         city_name = slugify(city_json[0]['title'])
         city_id = city_json[0]['id']
