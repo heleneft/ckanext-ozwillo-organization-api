@@ -228,10 +228,10 @@ class CreateOrganizationPlugin(plugins.SingletonPlugin):
     plugins.implements(plugins.interfaces.IOrganizationController, inherit=True)
 
     def create(self, entity):
-        after_create(entity, 'Cassis')
+        after_create(entity, '21060095300017')
 
 
-def after_create(entity, organization_name):
+def after_create(entity, organization_siret):
     '''
     This method is called after a new instance is created.
     It uses the services from data.gouv.fr to automatically add data to our new instance.
@@ -239,18 +239,25 @@ def after_create(entity, organization_name):
     long as an api returns the desired resources urls.
 
     :param entity: object, the organization being created
-    :param organization_name: string, the name of the organization being created. It has to be as close as possible
-    to the real city name as it would be used as the main parameter in the request to retrieve the data
+    :param organization_siret: string, the siret of the organization being created.
     :return:
     '''
 
-    organization = slugify(organization_name)
+    try:
+        organization = slugify(get_name_from_siret(organization_siret))
+        if organization is None:
+            raise ValueError
+        log.info(organization)
+    except (ValueError, requests.ConnectionError), e:
+        log.error('No organization found for this SIRET, no data will be added : {}'.format(e))
+        return
+
     organization_id = entity.id
     insee_re = re.compile(r'\d{5}')
     site_url = config.get('ckan.site_url')
+    check_url = site_url + '/api/3/action/package_search?q='
     base_url_1 = 'https://www.data.gouv.fr/api/1/territory/suggest/?q='
     base_url_2 = 'https://www.data.gouv.fr/api/1/spatial/zone/{}/datasets?'
-    check_url = site_url + '/api/3/action/package_search?q='
 
     try:
         # Get the city from the gouv api and extract the name, id, description and insee
@@ -261,29 +268,38 @@ def after_create(entity, organization_name):
         city_description = city_json[0]['page']
         city_insee = insee_re.search(city_id).group()
         log.info(city_name)
+    except (ValueError, AttributeError, KeyError, IndexError, requests.exceptions.RequestException), e:
+        log.error('No territory found for this organization, no data will be added : {}'.format(e))
+        return
 
-        # Check if a package with city_name already exists. If it does, add the date and time to the city name
-        package_exist = requests.get(check_url + city_name)
-        if package_exist.json()['result']['count'] != 0:
-            city_name += slugify(str(datetime.now()))[:19]
 
-        # Create the dataset that will contain all our new resources
-        package_data = {'name': city_name,
-                        'private': 'false',
-                        'owner_org': organization_id,
-                        'notes': city_description}
-        package_id = toolkit.get_action('package_create')({'return_id_only': 'true'}, package_data)
+    # Check if a package with city_name already exists. If it does, add the date and time to the city name
+    package_exist = requests.get(check_url + city_name)
+    if package_exist.json()['result']['count'] != 0:
+        raise ValueError('Error: An organization with this name already exists.')
 
-        # Get the others non dynamic urls from the data gouv api
+    # Create the dataset that will contain all our new resources
+    package_data = {'name': city_name,
+                    'private': 'false',
+                    'owner_org': organization_id,
+                    'notes': city_description}
+    package_id = toolkit.get_action('package_create')({'return_id_only': 'true'}, package_data)
+
+    # Get the others non dynamic urls from the data gouv api
+    try:
         city_datasets = requests.get(base_url_2.format(city_id))
         dataset_json = city_datasets.json()
+    except (ValueError, AttributeError, KeyError, IndexError, requests.exceptions.RequestException), e:
+        log.error('No datasets found for this organization, no data will be added to the dataset : {}'.format(e))
+        return
 
-        # Get the dataset dict with dynamic datasets
-        dataset_dict = setup_dataset_dict(city_insee)
+    # Get the dataset dict with dynamic datasets
+    dataset_dict = setup_dataset_dict(city_insee)
 
-        # Complete the dataset_dict with these new urls, after checking they are valid urls
-        # If there are few links for the same resource, takes the first valid one
-        for dataset in dataset_json:
+    # Complete the dataset_dict with these new urls, after checking they are valid urls
+    # If there are few links for the same resource, takes the first valid one
+    for dataset in dataset_json:
+        try:
             response = requests.get(dataset['uri'])
             if response.status_code == 404:
                 continue
@@ -295,20 +311,21 @@ def after_create(entity, organization_name):
                     if r.status_code == 200:
                         dataset_dict[dataset['title']] = resource['url']
                         break
+        except (ValueError, AttributeError, KeyError, IndexError, requests.exceptions.RequestException), e:
+            log.error('No resources found for this dataset, it will not be added to the new dataset : {}'.format(e))
 
-        # Create the resources from the dataset_dict in our previously created dataset
-        for key, value in dataset_dict.items():
-            gouv_resource = {'package_id': package_id,
-                             'url': value,
-                             'name': key}
-            toolkit.get_action('resource_create')({}, gouv_resource)
+    # Create the resources from the dataset_dict in our previously created dataset
+    resource_count = 0
+    for key, value in dataset_dict.items():
+        gouv_resource = {'package_id': package_id,
+                         'url': value,
+                         'name': key}
+        toolkit.get_action('resource_create')({}, gouv_resource)
+        resource_count += 1
 
-        log.info('Added %s resources to the dataset' % (len(dataset_dict.keys())))
-        log.debug(dataset_dict)
+    log.info('Added {} resources to the dataset'.format(resource_count))
+    log.debug(dataset_dict)
 
-    except Exception as e:
-        log.error(e)
-        return
 
 def setup_dataset_dict(city_insee):
     # Base resources urls for the 9 dynamic datasets found in every town page in datagouv
@@ -336,3 +353,25 @@ def setup_dataset_dict(city_insee):
                     'Adresses': url_adresses.format(city_insee)}
     
     return dataset_dict
+
+def get_name_from_siret(siret):
+
+    apiKey = '08d7efcd484c4d7ac925c0f4e3e6ca75'
+    secretKey = '3bedcd17968fa9f996a52c3357011e05'
+    url = "http://www.verif-siret.com/api/siret?siret=" + siret
+
+    try:
+        get = requests.get(url, auth=(apiKey, secretKey))
+        if get.status_code != 200:
+            raise requests.ConnectionError()
+    except requests.exceptions.RequestException as err:
+        log.error('An error occurred: {0}'.format(err))
+        result = None
+    else:
+        try:
+            result = get.json()['array_return'][0]['L1_NORMALISEE']
+        except (IndexError, TypeError, AttributeError):
+            log.error('No organization found for this siret number')
+            result = None
+    finally:
+        return result
