@@ -228,7 +228,7 @@ class CreateOrganizationPlugin(plugins.SingletonPlugin):
     plugins.implements(plugins.interfaces.IOrganizationController, inherit=True)
 
     def create(self, entity):
-        after_create(entity, '21060095300017')
+        after_create(entity, '21130005800016')
 
 
 def after_create(entity, organization_siret):
@@ -273,7 +273,7 @@ def after_create(entity, organization_siret):
         return
 
 
-    # Check if a package with city_name already exists. If it does, add the date and time to the city name
+    # Check if a package with city_name already exists
     package_exist = requests.get(check_url + city_name)
     if package_exist.json()['result']['count'] != 0:
         raise ValueError('Error: An organization with this name already exists.')
@@ -369,7 +369,7 @@ def get_name_from_siret(siret):
         result = None
     else:
         try:
-            result = get.json()['array_return'][0]['L1_NORMALISEE']
+            result = get.json()['array_return'][0]['LIBCOM']
         except (IndexError, TypeError, AttributeError):
             log.error('No organization found for this siret number')
             result = None
