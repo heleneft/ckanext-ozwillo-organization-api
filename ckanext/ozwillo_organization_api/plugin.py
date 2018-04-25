@@ -118,7 +118,10 @@ def create_organization(context, data_dict):
         session.flush()
 
         # Automatically add data from data gouv
-        after_create(group, data_dict['organization'])
+        dc_id = data_dict['organization']['dc_id']
+        siret_re = re.compile(r'\d{14}')
+        organization_insee = siret_re.search(dc_id).group()
+        after_create(group, organization_insee)
 
         # notify about organization creation
         services = {'services': [{
@@ -228,7 +231,7 @@ class CreateOrganizationPlugin(plugins.SingletonPlugin):
     plugins.implements(plugins.interfaces.IOrganizationController, inherit=True)
 
     def create(self, entity):
-        after_create(entity, '21130005800016')
+        after_create(entity, '21350238800019')
 
 
 def after_create(entity, organization_siret):
@@ -254,8 +257,6 @@ def after_create(entity, organization_siret):
 
     organization_id = entity.id
     insee_re = re.compile(r'\d{5}')
-    site_url = config.get('ckan.site_url')
-    check_url = site_url + '/api/3/action/package_search?q='
     base_url_1 = 'https://www.data.gouv.fr/api/1/territory/suggest/?q='
     base_url_2 = 'https://www.data.gouv.fr/api/1/spatial/zone/{}/datasets?'
 
@@ -264,26 +265,31 @@ def after_create(entity, organization_siret):
         city_response = requests.get(base_url_1 + organization)
         city_json = city_response.json()
         city_name = slugify(city_json[0]['title'])
-        city_id = city_json[0]['id']
         city_description = city_json[0]['page']
+        city_id = city_json[0]['id']
         city_insee = insee_re.search(city_id).group()
         log.info(city_name)
     except (ValueError, AttributeError, KeyError, IndexError, requests.exceptions.RequestException), e:
         log.error('No territory found for this organization, no data will be added : {}'.format(e))
         return
 
+    # Get the dataset dict with the 9 dynamic datasets
+    dataset_dict = setup_dataset_dict(city_insee)
 
-    # Check if a package with city_name already exists
-    package_exist = requests.get(check_url + city_name)
-    if package_exist.json()['result']['count'] != 0:
-        raise ValueError('Error: An organization with this name already exists.')
-
-    # Create the dataset that will contain all our new resources
-    package_data = {'name': city_name,
-                    'private': 'false',
-                    'owner_org': organization_id,
-                    'notes': city_description}
-    package_id = toolkit.get_action('package_create')({'return_id_only': 'true'}, package_data)
+    # Create the datasets and resources from the dataset_dict in our previously created dataset
+    resource_count = 0
+    for key, value in dataset_dict.items():
+        package_data = {'name': slugify(organization + '-' + key),
+                        'private': 'false',
+                        'owner_org': organization_id,
+                        'notes': city_description,
+                        'tags': [{'name': 'auto-import'}]}
+        package_id = toolkit.get_action('package_create')({'return_id_only': 'true'}, package_data)
+        gouv_resource = {'package_id': package_id,
+                         'url': value,
+                         'name': key}
+        toolkit.get_action('resource_create')({}, gouv_resource)
+        resource_count += 1
 
     # Get the others non dynamic urls from the data gouv api
     try:
@@ -293,38 +299,24 @@ def after_create(entity, organization_siret):
         log.error('No datasets found for this organization, no data will be added to the dataset : {}'.format(e))
         return
 
-    # Get the dataset dict with dynamic datasets
-    dataset_dict = setup_dataset_dict(city_insee)
-
-    # Complete the dataset_dict with these new urls, after checking they are valid urls
-    # If there are few links for the same resource, takes the first valid one
+    # For the other datasets, create a local dataset linked to the datagouv one after checking they are valid
     for dataset in dataset_json:
         try:
             response = requests.get(dataset['uri'])
             if response.status_code == 404:
                 continue
             else:
-                response_json = response.json()
-                resources = response_json['resources']
-                for resource in resources:
-                    r = requests.get(resource['url'])
-                    if r.status_code == 200:
-                        dataset_dict[dataset['title']] = resource['url']
-                        break
+                package_data = {'name': slugify(organization + '_' + dataset['title']),
+                                'private': 'false',
+                                'owner_org': organization_id,
+                                'notes': city_description,
+                                'url': dataset['uri'],
+                                'tags': [{'name': 'auto-import'}]}
+                toolkit.get_action('package_create')({}, package_data)
+                resource_count += 1
         except (ValueError, AttributeError, KeyError, IndexError, requests.exceptions.RequestException), e:
             log.error('No resources found for this dataset, it will not be added to the new dataset : {}'.format(e))
-
-    # Create the resources from the dataset_dict in our previously created dataset
-    resource_count = 0
-    for key, value in dataset_dict.items():
-        gouv_resource = {'package_id': package_id,
-                         'url': value,
-                         'name': key}
-        toolkit.get_action('resource_create')({}, gouv_resource)
-        resource_count += 1
-
     log.info('Added {} resources to the dataset'.format(resource_count))
-    log.debug(dataset_dict)
 
 
 def setup_dataset_dict(city_insee):
@@ -354,11 +346,13 @@ def setup_dataset_dict(city_insee):
     
     return dataset_dict
 
+
 def get_name_from_siret(siret):
 
-    apiKey = '08d7efcd484c4d7ac925c0f4e3e6ca75'
-    secretKey = '3bedcd17968fa9f996a52c3357011e05'
+    apiKey = config.get('ckanext.ozwillo_organization_api.verifsiret_apikey', '08d7efcd484c4d7ac925c0f4e3e6ca75')
+    secretKey = config.get('ckanext.ozwillo_organization_api.verifsiret_secretkey', '3bedcd17968fa9f996a52c3357011e05')
     url = "http://www.verif-siret.com/api/siret?siret=" + siret
+    result = None
 
     try:
         get = requests.get(url, auth=(apiKey, secretKey))
@@ -366,12 +360,10 @@ def get_name_from_siret(siret):
             raise requests.ConnectionError()
     except requests.exceptions.RequestException as err:
         log.error('An error occurred: {0}'.format(err))
-        result = None
     else:
         try:
             result = get.json()['array_return'][0]['LIBCOM']
         except (IndexError, TypeError, AttributeError):
             log.error('No organization found for this siret number')
-            result = None
     finally:
         return result
