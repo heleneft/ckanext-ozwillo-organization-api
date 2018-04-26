@@ -349,10 +349,15 @@ def setup_dataset_dict(city_insee):
 
 def get_name_from_siret(siret):
 
-    apiKey = config.get('ckanext.ozwillo_organization_api.verifsiret_apikey', '08d7efcd484c4d7ac925c0f4e3e6ca75')
-    secretKey = config.get('ckanext.ozwillo_organization_api.verifsiret_secretkey', '3bedcd17968fa9f996a52c3357011e05')
+    apiKey = config.get('ckanext.ozwillo_organization_api.verifsiret_apikey', '')
+    secretKey = config.get('ckanext.ozwillo_organization_api.verifsiret_secretkey', '')
     url = "http://www.verif-siret.com/api/siret?siret=" + siret
     result = None
+
+    if apiKey == '' or secretKey == '':
+        log.error('Verif-siret config incomplete, please register your api key and api secret in the config file')
+        result = ''
+        return result
 
     try:
         get = requests.get(url, auth=(apiKey, secretKey))

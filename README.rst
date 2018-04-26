@@ -83,6 +83,9 @@ Document any optional config settings here. For example::
     # (optional, default: 24).
     ckanext.ozwillo_organization_api.some_setting = some_default_value
 
+    # To enable all fonctionnalities, please register an api key and api secret from verif siret governmental service :
+    # ckanext.ozwillo_organization_api.verifsiret_apikey =
+    # ckanext.ozwillo_organization_api.verifsiret_secretkey =
 
 ------------------------
 Development Installation
