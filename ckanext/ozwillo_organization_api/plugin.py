@@ -120,8 +120,12 @@ def create_organization(context, data_dict):
         # Automatically add data from data gouv
         dc_id = data_dict['organization']['dc_id']
         siret_re = re.compile(r'\d{14}')
-        organization_insee = siret_re.search(dc_id).group()
-        after_create(group, organization_insee)
+        log.info(dc_id)
+        try:
+            organization_insee = siret_re.search(dc_id).group()
+            after_create(group, organization_insee)
+        except AttributeError:
+            log.error('SIRET did not match pattern, no data will be added')
 
         # notify about organization creation
         services = {'services': [{
