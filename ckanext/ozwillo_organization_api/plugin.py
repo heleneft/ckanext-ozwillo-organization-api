@@ -13,8 +13,10 @@ import ckan.plugins.toolkit as toolkit
 import ckan.logic as logic
 import ckan.lib.base as base
 
+import ckan.model as model
+
 from pylons import config
-from ckan.common import request, _
+from ckan.common import request, _, c
 from ckan.logic.action.create import _group_or_org_create as group_or_org_create
 from ckan.logic.action.create import user_create
 from ckan.logic.action.delete import _group_or_org_purge
@@ -115,17 +117,17 @@ def create_organization(context, data_dict):
                          value=client_id).save()
         model.GroupExtra(group_id=group.id, key='client_secret',
                          value=client_secret).save()
-        session.flush()
 
         # Automatically add data from data gouv
         dc_id = data_dict['organization']['dc_id']
         siret_re = re.compile(r'\d{14}')
-        log.info(dc_id)
         try:
             organization_insee = siret_re.search(dc_id).group()
-            after_create(group, organization_insee)
+            after_create(group, organization_insee, user_dict['name'])
         except AttributeError:
             log.error('SIRET did not match pattern, no data will be added')
+
+        session.flush()
 
         # notify about organization creation
         services = {'services': [{
@@ -235,10 +237,10 @@ class CreateOrganizationPlugin(plugins.SingletonPlugin):
     plugins.implements(plugins.interfaces.IOrganizationController, inherit=True)
 
     def create(self, entity):
-        after_create(entity, '21350238800019')
+        after_create(entity, '21620516100013', 'user')
 
 
-def after_create(entity, organization_siret):
+def after_create(entity, organization_siret, user):
     '''
     This method is called after a new instance is created.
     It uses the services from data.gouv.fr to automatically add data to our new instance.
@@ -288,12 +290,17 @@ def after_create(entity, organization_siret):
                         'owner_org': organization_id,
                         'notes': city_description,
                         'tags': [{'name': 'auto-import'}]}
-        package_id = toolkit.get_action('package_create')({'return_id_only': 'true'}, package_data)
-        gouv_resource = {'package_id': package_id,
-                         'url': value,
-                         'name': key}
-        toolkit.get_action('resource_create')({}, gouv_resource)
-        resource_count += 1
+        try:
+            context = {'model': model, 'session': model.Session,
+                       'user': user, 'return_id_only': 'true'}
+            package_id = toolkit.get_action('package_create')(context, package_data)
+            gouv_resource = {'package_id': package_id,
+                             'url': value,
+                             'name': key}
+            toolkit.get_action('resource_create')(context, gouv_resource)
+            resource_count += 1
+        except Exception as err:
+            log.info(err)
 
     # Get the others non dynamic urls from the data gouv api
     try:
@@ -310,13 +317,14 @@ def after_create(entity, organization_siret):
             if response.status_code == 404:
                 continue
             else:
+                context = {'model': model, 'session': model.Session, 'user': user}
                 package_data = {'name': slugify(organization + '_' + dataset['title']),
                                 'private': 'false',
                                 'owner_org': organization_id,
                                 'notes': city_description,
                                 'url': dataset['uri'],
                                 'tags': [{'name': 'auto-import'}]}
-                toolkit.get_action('package_create')({}, package_data)
+                toolkit.get_action('package_create')(context, package_data)
                 resource_count += 1
         except (ValueError, AttributeError, KeyError, IndexError, requests.exceptions.RequestException), e:
             log.error('No resources found for this dataset, it will not be added to the new dataset : {}'.format(e))
